@@ -1,0 +1,616 @@
+import { firebaseConfig } from "./firebase-config.js";
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.2.1/firebase-app.js";
+import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/12.2.1/firebase-auth.js";
+import {
+  getFirestore, doc, setDoc, getDoc, updateDoc, onSnapshot,
+  collection, writeBatch, serverTimestamp
+} from "https://www.gstatic.com/firebasejs/12.2.1/firebase-firestore.js";
+import QRCode from "https://cdn.jsdelivr.net/npm/qrcode@1.5.4/+esm";
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+
+const $ = (selector) => document.querySelector(selector);
+const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
+  "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"
+}[char]));
+
+const TEAM_NAMES = [
+  "The Bogey Boys","Fairway Fiends","Grip It & Sip It","The Tree Magnets",
+  "Sandbaggers Anonymous","The Shank Redemption","Fore Play Specialists",
+  "Beerway Bandits","Par-Tee Animals","Pin Seekers","Lost Ball Legends",
+  "The Three-Putt Club"
+];
+
+const AWARDS = [
+  "Beer Monster","Chaos King","Biggest Choke","Sand Specialist",
+  "Tree Magnet","Best Banter","Court Jester","MVP"
+];
+
+const CHAOS_CARDS = [
+  ["Putter Ban","Legendary","🚫","Your team loses both putters for the rest of the round. Use another club on every green."],
+  ["Worst Ball Ambrose","Legendary","☠️","For this hole, your team must always play from the worst of your two shots."],
+  ["Bag Swap","Legendary","🎒","Swap golf bags with your paired team for the entire hole."],
+  ["Second-Best Shot","Epic","2️⃣","Reject your best shot and play from the second-best shot for the whole hole."],
+  ["Five-Club Lockdown","Epic","🔒","Choose five clubs only. Both players are restricted to them for the next three holes."],
+  ["Wrong-Handed Hole","Epic","🫲","Both players complete the entire hole opposite-handed."],
+  ["No Putters","Epic","🥄","Both players must putt with wedges for the next two holes."],
+  ["One Club Only","Rare","1️⃣","Choose one club now. Your team uses only that club until the ball is holed."],
+  ["Opponent Controls Clubs","Rare","😈","Your paired team chooses every club your team uses on this hole."],
+  ["No Tee Allowed","Rare","📍","Both tee shots must be hit directly from the ground."],
+  ["Bunker Tax","Rare","🏖️","Each bunker visit adds one extra stroke to your submitted team score."],
+  ["Four-Ball Tee Shot","Advantage","💥","Both players hit two tee shots. Choose the best of all four."],
+  ["Mulligan Bank","Advantage","✨","Your team receives one free replay anywhere on this hole."],
+  ["Foot Wedge","Advantage","👟","Move the chosen ball one club length, no closer to the hole."]
+];
+
+let user = null;
+let eventCode = null;
+let teamSlot = null;
+let joinToken = null;
+let eventData = null;
+let teams = [];
+let isAdmin = false;
+let unsubscribers = [];
+
+function randomCode(length = 6) {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  return Array.from({ length }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join("");
+}
+
+function baseUrl() {
+  return `${location.origin}${location.pathname}`;
+}
+
+function readUrl() {
+  const params = new URLSearchParams(location.search);
+  eventCode = (params.get("event") || "").toUpperCase();
+  teamSlot = Number(params.get("team")) || null;
+  joinToken = params.get("token") || "";
+}
+
+function showScreen(screenId) {
+  document.querySelectorAll(".screen").forEach((screen) => screen.classList.remove("active"));
+  document.getElementById(screenId).classList.add("active");
+  document.querySelectorAll(".nav-button").forEach((button) => {
+    button.classList.toggle("active", button.dataset.screen === screenId);
+  });
+}
+
+async function ensureAuth() {
+  if (!auth.currentUser) await signInAnonymously(auth);
+  user = auth.currentUser;
+  $("#connectionStatus").textContent = "Live connection ready";
+  $("#connectionStatus").className = "status-pill success";
+}
+
+function ownTeam() {
+  return teams.find((team) => team.slot === teamSlot) || null;
+}
+
+function pairedTeam() {
+  const index = teams.findIndex((team) => team.slot === teamSlot);
+  if (index < 0 || teams.length < 2) return null;
+  return teams[(index + 1) % teams.length];
+}
+
+async function createTournament() {
+  const code = randomCode();
+  const count = Number($("#teamCount").value);
+  const event = {
+    name: $("#eventName").value.trim() || "Bogey Banter Tournament",
+    theme: $("#theme").value,
+    teamCount: count,
+    holes: Number($("#holes").value),
+    chaosMode: $("#chaosMode").value,
+    beerStops: $("#beerStops").checked,
+    hole: 1,
+    status: "lobby",
+    adminUid: user.uid,
+    story: ["Tournament created by Team 1."],
+    awardsOpen: false,
+    awardsFinalised: false,
+    createdAt: serverTimestamp()
+  };
+
+  await setDoc(doc(db, "events", code), event);
+  const batch = writeBatch(db);
+  for (let slot = 1; slot <= count; slot += 1) {
+    batch.set(doc(db, "events", code, "teams", String(slot)), {
+      slot,
+      joinToken: randomCode(12),
+      name: "",
+      players: ["", ""],
+      ownerUid: slot === 1 ? user.uid : null,
+      drawnHole: 0,
+      card: null,
+      scoreHole: 0,
+      score: null,
+      acceptedHole: 0,
+      cumulativeScore: 0,
+      readyBreakHole: 0,
+      votesLocked: false,
+      votes: {}
+    });
+  }
+  await batch.commit();
+  location.href = `${baseUrl()}?event=${code}&team=1`;
+}
+
+async function openManualTeam() {
+  const code = $("#manualEventCode").value.trim().toUpperCase();
+  const slot = Number($("#manualTeamSlot").value);
+  const token = $("#manualTeamToken").value.trim();
+  if (!code || !slot || !token) return alert("Enter the code, team number and team token.");
+  location.href = `${baseUrl()}?event=${encodeURIComponent(code)}&team=${slot}&token=${encodeURIComponent(token)}`;
+}
+
+async function loadEvent() {
+  if (!eventCode) return;
+  const eventRef = doc(db, "events", eventCode);
+  const snapshot = await getDoc(eventRef);
+  if (!snapshot.exists()) {
+    $("#connectionStatus").textContent = "Tournament not found";
+    $("#connectionStatus").className = "status-pill error";
+    return;
+  }
+
+  eventData = { id: eventCode, ...snapshot.data() };
+  isAdmin = eventData.adminUid === user.uid;
+  $("#bottomNav").classList.remove("hidden");
+  showScreen("lobbyScreen");
+
+  unsubscribers.forEach((unsubscribe) => unsubscribe());
+  unsubscribers = [
+    onSnapshot(eventRef, (snap) => {
+      eventData = { id: eventCode, ...snap.data() };
+      renderAll();
+    }),
+    onSnapshot(collection(db, "events", eventCode, "teams"), (snap) => {
+      teams = snap.docs.map((entry) => entry.data()).sort((a, b) => a.slot - b.slot);
+      renderAll();
+    })
+  ];
+}
+
+function renderAll() {
+  if (!eventData) return;
+  const registered = teams.filter((team) => team.name && team.players.every(Boolean)).length;
+  $("#eventStatus").textContent = `${eventData.name} • ${eventData.id}`;
+  $("#metricHole").textContent = eventData.hole;
+  $("#metricTeams").textContent = `${registered}/${eventData.teamCount}`;
+  $("#metricMode").textContent = eventData.status;
+
+  renderRegistration();
+  renderTeams();
+  renderQrCodes();
+  renderDraw();
+  renderScoring();
+  renderLeaderboard();
+  renderStory();
+  renderAwards();
+  renderAdmin();
+}
+
+function renderRegistration() {
+  const team = ownTeam();
+  const canRegister = Boolean(team && eventData.status === "lobby");
+  $("#teamRegistrationPanel").classList.toggle("hidden", !canRegister);
+  if (!canRegister) return;
+
+  const usedNames = teams.map((entry) => entry.name).filter(Boolean);
+  $("#teamName").innerHTML = `<option value="">Choose a team name</option>` +
+    TEAM_NAMES.map((name) => {
+      const unavailable = usedNames.includes(name) && team.name !== name;
+      return `<option ${unavailable ? "disabled" : ""} ${team.name === name ? "selected" : ""}>${escapeHtml(name)}${unavailable ? " 🔒" : ""}</option>`;
+    }).join("");
+
+  $("#playerOne").value = team.players?.[0] || "";
+  $("#playerTwo").value = team.players?.[1] || "";
+}
+
+function renderTeams() {
+  $("#teamsList").innerHTML = teams.map((team) => {
+    const ready = team.name && team.players.every(Boolean);
+    return `<div class="team-row">
+      <span class="team-status ${ready ? "ready" : ""}">${ready ? "Ready" : "Waiting"}</span>
+      <strong>Team ${team.slot}: ${escapeHtml(team.name || "Unclaimed")}</strong><br>
+      <small>${escapeHtml(team.players.filter(Boolean).join(" & ") || "Waiting for players")}</small>
+    </div>`;
+  }).join("");
+
+  $("#startTournament").classList.toggle("hidden", !isAdmin || eventData.status !== "lobby");
+}
+
+async function saveTeam() {
+  const team = ownTeam();
+  if (!team) return;
+  if (teamSlot !== 1 && joinToken !== team.joinToken) {
+    return alert("This team link is invalid or has been regenerated.");
+  }
+
+  const name = $("#teamName").value;
+  const playerOne = $("#playerOne").value.trim();
+  const playerTwo = $("#playerTwo").value.trim();
+  if (!name || !playerOne || !playerTwo) return alert("Complete every team field.");
+  if (teams.some((entry) => entry.slot !== teamSlot && entry.name === name)) {
+    return alert("That team name has already been chosen.");
+  }
+
+  await updateDoc(doc(db, "events", eventCode, "teams", String(teamSlot)), {
+    name,
+    players: [playerOne, playerTwo],
+    ownerUid: user.uid
+  });
+}
+
+async function startTournament() {
+  if (teams.some((team) => !team.name || !team.players.every(Boolean))) {
+    return alert("Every team must register before the tournament starts.");
+  }
+  await updateDoc(doc(db, "events", eventCode), {
+    status: "playing",
+    story: [...(eventData.story || []), `Tournament started with ${teams.length} teams.`]
+  });
+}
+
+async function renderQrCodes() {
+  const grid = $("#qrGrid");
+  grid.innerHTML = "";
+  $("#regenerateCodes").classList.toggle("hidden", !isAdmin);
+  $("#printQrSheet").classList.toggle("hidden", !isAdmin);
+
+  if (!isAdmin) {
+    grid.innerHTML = `<p>Only the tournament admin can view or regenerate team QR codes.</p>`;
+    return;
+  }
+
+  for (const team of teams) {
+    const link = `${baseUrl()}?event=${encodeURIComponent(eventCode)}&team=${team.slot}&token=${encodeURIComponent(team.joinToken)}`;
+    const card = document.createElement("article");
+    card.className = "qr-card";
+    card.innerHTML = `<div class="qr-target"></div><strong>Team ${team.slot}</strong><small>${escapeHtml(team.name || "Unclaimed")}</small>`;
+    grid.appendChild(card);
+    try {
+      await QRCode.toCanvas(card.querySelector(".qr-target"), link, {
+        width: 220,
+        margin: 2,
+        errorCorrectionLevel: "M"
+      });
+    } catch (error) {
+      card.querySelector(".qr-target").textContent = link;
+    }
+  }
+}
+
+function renderDraw() {
+  const box = $("#drawContent");
+  const team = ownTeam();
+
+  if (eventData.status === "lobby") {
+    box.innerHTML = `<div class="panel center"><div class="big-icon">🔒</div><h2>Waiting for admin</h2></div>`;
+    return;
+  }
+  if (!team) {
+    box.innerHTML = `<div class="panel">Open the tournament using your team QR code.</div>`;
+    return;
+  }
+  if (eventData.status === "break") {
+    const ready = team.readyBreakHole === eventData.hole;
+    box.innerHTML = `<div class="panel center">
+      <div class="big-icon">🍺</div>
+      <h2>Beer &amp; Bump stop</h2>
+      <p>No timer. Tap ready when your team is finished.</p>
+      <button id="readyAfterBreak" class="${ready ? "success" : "primary"}" ${ready ? "disabled" : ""}>
+        ${ready ? "Team ready ✓" : "We're ready"}
+      </button>
+    </div>`;
+    $("#readyAfterBreak")?.addEventListener("click", () => updateDoc(
+      doc(db, "events", eventCode, "teams", String(teamSlot)),
+      { readyBreakHole: eventData.hole }
+    ));
+    return;
+  }
+
+  const drawn = team.drawnHole === eventData.hole;
+  box.innerHTML = `<div class="panel">
+    <div class="chaos-card">
+      ${drawn ? `
+        <div>
+          <div class="rarity">${escapeHtml(team.card[1])}</div>
+          <h2>${escapeHtml(team.card[2])} ${escapeHtml(team.card[0])}</h2>
+          <p>${escapeHtml(team.card[3])}</p>
+        </div>` : `
+        <div>
+          <div class="rarity">One draw per team per hole</div>
+          <h2>Draw your chaos card</h2>
+          <p>Your paired scoring team sees it immediately.</p>
+        </div>`}
+      <div>Bogey Banter • Hole ${eventData.hole}</div>
+    </div>
+    <button id="drawCard" class="primary" ${drawn ? 'disabled style="opacity:.45"' : ""}>
+      ${drawn ? "Card already drawn" : "Draw card"}
+    </button>
+  </div>`;
+
+  $("#drawCard")?.addEventListener("click", async () => {
+    const card = CHAOS_CARDS[Math.floor(Math.random() * CHAOS_CARDS.length)];
+    await updateDoc(doc(db, "events", eventCode, "teams", String(teamSlot)), {
+      drawnHole: eventData.hole,
+      card
+    });
+    await updateDoc(doc(db, "events", eventCode), {
+      story: [...(eventData.story || []), `Hole ${eventData.hole}: ${team.name} drew ${card[0]}.`]
+    });
+  });
+}
+
+function renderScoring() {
+  const box = $("#scoreContent");
+  const team = ownTeam();
+  const opponent = pairedTeam();
+
+  if (eventData.status !== "playing") {
+    box.innerHTML = `<div class="panel center"><div class="big-icon">🔒</div><h2>Scoring locked</h2></div>`;
+    return;
+  }
+  if (!team || !opponent) {
+    box.innerHTML = `<div class="panel">Join a registered team to score.</div>`;
+    return;
+  }
+
+  const cardNotice = opponent.drawnHole === eventData.hole
+    ? `<div class="callout"><strong>${escapeHtml(opponent.name)} drew ${escapeHtml(opponent.card[2])} ${escapeHtml(opponent.card[0])}</strong><br>${escapeHtml(opponent.card[3])}</div>`
+    : `<div class="callout">Waiting for ${escapeHtml(opponent.name)} to draw their card.</div>`;
+
+  const existingScore = opponent.scoreHole === eventData.hole ? opponent.score ?? "" : "";
+  box.innerHTML = `<div class="panel">
+    <h2>Paired scoring</h2>
+    ${cardNotice}
+    <p>You are submitting the score for <strong>${escapeHtml(opponent.name)}</strong>. Teams cannot score themselves.</p>
+    <label>
+      Total strokes
+      <input id="opponentScore" type="number" min="1" max="30" value="${existingScore}">
+    </label>
+    <button id="submitOpponentScore" class="primary">Submit score</button>
+  </div>`;
+
+  $("#submitOpponentScore").addEventListener("click", async () => {
+    const score = Number($("#opponentScore").value);
+    if (!score) return alert("Enter a valid score.");
+    await updateDoc(doc(db, "events", eventCode, "teams", String(opponent.slot)), {
+      scoreHole: eventData.hole,
+      score,
+      acceptedHole: 0
+    });
+  });
+}
+
+function renderLeaderboard() {
+  const ranked = [...teams].sort((a, b) => (a.cumulativeScore || 0) - (b.cumulativeScore || 0));
+  $("#leaderboard").innerHTML = ranked.map((team, index) => `
+    <div class="leader-row">
+      <strong>${index + 1}. ${escapeHtml(team.name || `Team ${team.slot}`)}</strong>
+      <span style="float:right">${team.cumulativeScore || 0}</span><br>
+      <small>${escapeHtml(team.players.filter(Boolean).join(" & "))}</small>
+    </div>
+  `).join("");
+}
+
+function renderStory() {
+  $("#storyList").innerHTML = (eventData.story || []).slice().reverse().map((item) =>
+    `<div class="story-item">${escapeHtml(item)}</div>`
+  ).join("");
+}
+
+function renderAwards() {
+  const box = $("#awardsContent");
+  const team = ownTeam();
+
+  if (!eventData.awardsOpen) {
+    box.innerHTML = `<div class="panel center"><div class="big-icon">🎖️</div><h2>Award voting is not open</h2></div>`;
+    return;
+  }
+
+  if (isAdmin) {
+    const locked = teams.filter((entry) => entry.votesLocked).length;
+    const allLocked = locked === teams.length;
+    const tally = {};
+    AWARDS.forEach((award) => {
+      tally[award] = {};
+      teams.forEach((entry) => {
+        const vote = entry.votes?.[award];
+        if (vote) tally[award][vote] = (tally[award][vote] || 0) + 1;
+      });
+    });
+
+    box.innerHTML = `<div class="panel">
+      <h2>Admin award tally</h2>
+      <p class="callout">${locked}/${teams.length} team ballots locked.</p>
+      ${AWARDS.map((award) => {
+        const results = Object.entries(tally[award]).sort((a, b) => b[1] - a[1]);
+        return `<div class="team-row"><strong>${escapeHtml(award)}</strong><br>${
+          results.length ? results.map(([name, votes]) => `${escapeHtml(name)}: ${votes}`).join(" • ") : "No votes"
+        }</div>`;
+      }).join("")}
+      <button id="finaliseAwards" class="primary" ${allLocked ? "" : 'disabled style="opacity:.45"'}>Finalise winners</button>
+    </div>`;
+    $("#finaliseAwards")?.addEventListener("click", async () => {
+      const winners = {};
+      AWARDS.forEach((award) => {
+        const results = Object.entries(tally[award]).sort((a, b) => b[1] - a[1]);
+        if (results[0]) winners[award] = results[0][0];
+      });
+      await updateDoc(doc(db, "events", eventCode), {
+        awardsFinalised: true,
+        awardWinners: winners,
+        story: [...(eventData.story || []), ...Object.entries(winners).map(([award, winner]) => `${award}: ${winner}`)]
+      });
+    });
+    return;
+  }
+
+  if (!team) {
+    box.innerHTML = `<div class="panel">Join a team to vote.</div>`;
+    return;
+  }
+
+  const playerOptions = teams.flatMap((entry) => entry.players).filter(Boolean);
+  box.innerHTML = `<div class="panel">
+    <h2>${escapeHtml(team.name)} award ballot</h2>
+    <p class="callout">One vote per category. Once locked, your team cannot change its ballot.</p>
+    <div class="form-grid">
+      ${AWARDS.map((award) => `
+        <label>${escapeHtml(award)}
+          <select data-award="${escapeHtml(award)}" ${team.votesLocked ? "disabled" : ""}>
+            <option value="">Choose recipient</option>
+            ${playerOptions.map((player) => `<option ${team.votes?.[award] === player ? "selected" : ""}>${escapeHtml(player)}</option>`).join("")}
+          </select>
+        </label>
+      `).join("")}
+      <button id="lockAwardVotes" class="${team.votesLocked ? "success" : "primary"}" ${team.votesLocked ? "disabled" : ""}>
+        ${team.votesLocked ? "Votes locked ✓" : "Lock team votes"}
+      </button>
+    </div>
+  </div>`;
+
+  if (!team.votesLocked) {
+    $("#lockAwardVotes").addEventListener("click", async () => {
+      const votes = {};
+      document.querySelectorAll("[data-award]").forEach((select) => {
+        votes[select.dataset.award] = select.value;
+      });
+      if (AWARDS.some((award) => !votes[award])) return alert("Choose a recipient in every category.");
+      await updateDoc(doc(db, "events", eventCode, "teams", String(teamSlot)), {
+        votes,
+        votesLocked: true
+      });
+    });
+  }
+}
+
+function renderAdmin() {
+  const box = $("#adminContent");
+  if (!isAdmin) {
+    box.innerHTML = `<div class="panel center"><div class="big-icon">👑</div><h2>Admin only</h2></div>`;
+    return;
+  }
+
+  const allAccepted = teams.length > 0 && teams.every((team) => team.acceptedHole === eventData.hole);
+  const allReady = teams.length > 0 && teams.every((team) => team.readyBreakHole === eventData.hole);
+
+  const rows = teams.map((team) => `
+    <div class="score-row">
+      <strong>${escapeHtml(team.name || `Team ${team.slot}`)}</strong><br>
+      <small>${team.scoreHole === eventData.hole ? `${team.score} strokes submitted` : "Waiting for paired team score"}</small>
+      <button class="${team.acceptedHole === eventData.hole ? "success" : "secondary"} accept-score"
+        data-slot="${team.slot}"
+        ${team.scoreHole !== eventData.hole ? 'disabled style="opacity:.45"' : ""}>
+        ${team.acceptedHole === eventData.hole ? "Accepted" : "Accept"}
+      </button>
+    </div>
+  `).join("");
+
+  box.innerHTML = `<div class="panel">
+    <h2>Admin hole control</h2>
+    ${eventData.status === "break" ? `
+      <p class="callout">Beer &amp; Bump readiness: ${teams.filter((team) => team.readyBreakHole === eventData.hole).length}/${teams.length}</p>
+      <button id="continueAfterBreak" class="primary" ${allReady ? "" : 'disabled style="opacity:.45"'}>Unlock next hole</button>
+    ` : `
+      ${rows}
+      <button id="advanceHole" class="primary" ${allAccepted ? "" : 'disabled style="opacity:.45"'}>
+        ${eventData.hole >= eventData.holes ? "Open award voting" : "Accept all and advance"}
+      </button>
+    `}
+  </div>`;
+
+  document.querySelectorAll(".accept-score").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const slot = Number(button.dataset.slot);
+      const team = teams.find((entry) => entry.slot === slot);
+      const previousCumulative = team.cumulativeScore || 0;
+      await updateDoc(doc(db, "events", eventCode, "teams", String(slot)), {
+        acceptedHole: eventData.hole,
+        cumulativeScore: previousCumulative + Number(team.score || 0)
+      });
+    });
+  });
+
+  $("#advanceHole")?.addEventListener("click", async () => {
+    if (eventData.hole >= eventData.holes) {
+      await updateDoc(doc(db, "events", eventCode), {
+        status: "finished",
+        awardsOpen: true,
+        story: [...(eventData.story || []), "Final scores locked. Award voting opened."]
+      });
+      return;
+    }
+    if (eventData.beerStops && eventData.hole % 3 === 0) {
+      await updateDoc(doc(db, "events", eventCode), {
+        status: "break",
+        story: [...(eventData.story || []), `Beer & Bump stop after hole ${eventData.hole}.`]
+      });
+      return;
+    }
+    await advanceToNextHole();
+  });
+
+  $("#continueAfterBreak")?.addEventListener("click", advanceToNextHole);
+}
+
+async function advanceToNextHole() {
+  const nextHole = eventData.hole + 1;
+  await updateDoc(doc(db, "events", eventCode), {
+    hole: nextHole,
+    status: "playing",
+    story: [...(eventData.story || []), `Hole ${nextHole} unlocked.`]
+  });
+}
+
+async function regenerateCodes() {
+  const batch = writeBatch(db);
+  teams.forEach((team) => {
+    batch.update(doc(db, "events", eventCode, "teams", String(team.slot)), {
+      joinToken: randomCode(12)
+    });
+  });
+  await batch.commit();
+  alert("New team codes generated. Old QR links are now invalid.");
+}
+
+function startDemo() {
+  alert("Demo mode will be restored in the next polish build. The live multiplayer foundation is now the priority.");
+}
+
+for (let count = 2; count <= 12; count += 1) {
+  $("#teamCount").insertAdjacentHTML("beforeend", `<option ${count === 4 ? "selected" : ""}>${count}</option>`);
+}
+
+$("#openCreate").addEventListener("click", () => $("#createPanel").classList.toggle("hidden"));
+$("#openJoin").addEventListener("click", () => $("#joinPanel").classList.toggle("hidden"));
+$("#openDemo").addEventListener("click", startDemo);
+$("#createTournament").addEventListener("click", createTournament);
+$("#joinTournament").addEventListener("click", openManualTeam);
+$("#saveTeam").addEventListener("click", saveTeam);
+$("#startTournament").addEventListener("click", startTournament);
+$("#regenerateCodes").addEventListener("click", regenerateCodes);
+$("#printQrSheet").addEventListener("click", () => window.print());
+document.querySelectorAll(".nav-button").forEach((button) => {
+  button.addEventListener("click", () => showScreen(button.dataset.screen));
+});
+
+readUrl();
+try {
+  await ensureAuth();
+  await loadEvent();
+} catch (error) {
+  console.error(error);
+  $("#connectionStatus").textContent = "Connection failed";
+  $("#connectionStatus").className = "status-pill error";
+  alert(`Bogey Banter could not connect: ${error.message}`);
+}
+
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("./service-worker.js").catch(console.error);
+}

@@ -1,0 +1,10 @@
+{
+  "name": "Bogey Banter",
+  "short_name": "Bogey Banter",
+  "description": "The ultimate social golf tournament app.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#0b0f0a",
+  "theme_color": "#10150f",
+  "icons": []
+}
