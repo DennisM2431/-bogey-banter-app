@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#10150f">
+  <meta name="description" content="Bogey Banter — the ultimate social golf tournament app.">
+  <link rel="manifest" href="./manifest.json">
+  <link rel="stylesheet" href="./styles.css">
+  <title>Bogey Banter</title>
+</head>
+<body>
+  <main class="app-shell">
+    <header class="hero">
+      <div class="eyebrow">BOGEY BANTER</div>
+      <h1>The ultimate social golf tournament app.</h1>
+      <p>Create a live Ambrose tournament, join by QR code, draw chaos cards, score your paired team and finish with group-voted awards.</p>
+      <div class="status-row">
+        <span id="connectionStatus" class="status-pill warning">Connecting…</span>
+        <span id="eventStatus" class="status-pill">No tournament loaded</span>
+      </div>
+    </header>
+
+    <section id="homeScreen" class="screen active">
+      <div class="panel">
+        <h2>Start here</h2>
+        <div class="button-grid">
+          <button id="openCreate" class="primary">Create tournament</button>
+          <button id="openJoin" class="secondary">Join tournament</button>
+          <button id="openDemo" class="secondary">Demo mode</button>
+        </div>
+      </div>
+
+      <div id="createPanel" class="panel hidden">
+        <h2>Create tournament</h2>
+        <div class="form-grid">
+          <label>
+            Tournament name
+            <input id="eventName" value="Jared's Bucks Cup">
+          </label>
+          <label>
+            Theme
+            <select id="theme">
+              <option>Bucks Weekend</option>
+              <option>Classic Golf</option>
+              <option>Corporate Day</option>
+              <option>Christmas Golf</option>
+            </select>
+          </label>
+          <label>
+            Number of teams
+            <select id="teamCount"></select>
+          </label>
+          <label>
+            Holes
+            <select id="holes">
+              <option value="9">9 holes</option>
+              <option value="18" selected>18 holes</option>
+            </select>
+          </label>
+          <label>
+            Chaos deck
+            <select id="chaosMode">
+              <option>Normal</option>
+              <option selected>Extreme</option>
+            </select>
+          </label>
+          <label class="check-row">
+            <input id="beerStops" type="checkbox" checked>
+            Beer &amp; Bump after every third hole
+          </label>
+          <button id="createTournament" class="primary">Create live tournament</button>
+        </div>
+      </div>
+
+      <div id="joinPanel" class="panel hidden">
+        <h2>Join tournament</h2>
+        <div class="form-grid">
+          <label>
+            Tournament code
+            <input id="manualEventCode" autocapitalize="characters" placeholder="e.g. BGY123">
+          </label>
+          <label>
+            Team number
+            <input id="manualTeamSlot" type="number" min="1" max="12">
+          </label>
+          <label>
+            Team token
+            <input id="manualTeamToken" placeholder="From the admin">
+          </label>
+          <button id="joinTournament" class="primary">Open team</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="lobbyScreen" class="screen">
+      <div class="metrics">
+        <div class="metric"><strong id="metricHole">1</strong><span>Current hole</span></div>
+        <div class="metric"><strong id="metricTeams">0/0</strong><span>Teams joined</span></div>
+        <div class="metric"><strong id="metricMode">Lobby</strong><span>Status</span></div>
+      </div>
+
+      <div id="teamRegistrationPanel" class="panel hidden">
+        <h2>Register your team</h2>
+        <div class="form-grid">
+          <label>
+            Team name
+            <select id="teamName"></select>
+          </label>
+          <label>
+            Player 1
+            <input id="playerOne">
+          </label>
+          <label>
+            Player 2
+            <input id="playerTwo">
+          </label>
+          <button id="saveTeam" class="primary">Save team</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Live lobby</h2>
+        <div id="teamsList"></div>
+        <button id="startTournament" class="success hidden">Start tournament</button>
+      </div>
+    </section>
+
+    <section id="qrScreen" class="screen">
+      <div class="panel">
+        <h2>Team QR codes</h2>
+        <p class="callout">Each QR opens the correct team slot. Regenerating codes makes all previous QR links invalid.</p>
+        <div id="qrGrid" class="qr-grid"></div>
+        <button id="regenerateCodes" class="secondary hidden">Regenerate team codes</button>
+        <button id="printQrSheet" class="secondary hidden">Print QR sheet</button>
+      </div>
+    </section>
+
+    <section id="drawScreen" class="screen">
+      <div id="drawContent"></div>
+    </section>
+
+    <section id="scoreScreen" class="screen">
+      <div id="scoreContent"></div>
+    </section>
+
+    <section id="leaderboardScreen" class="screen">
+      <div class="panel">
+        <h2>Leaderboard</h2>
+        <div id="leaderboard"></div>
+      </div>
+    </section>
+
+    <section id="storyScreen" class="screen">
+      <div class="panel">
+        <h2>Story of the day</h2>
+        <div id="storyList"></div>
+      </div>
+    </section>
+
+    <section id="awardsScreen" class="screen">
+      <div id="awardsContent"></div>
+    </section>
+
+    <section id="adminScreen" class="screen">
+      <div id="adminContent"></div>
+    </section>
+  </main>
+
+
+  <aside id="adminScoreBanner" class="admin-score-banner hidden" aria-live="assertive">
+    <div class="banner-content">
+      <div class="banner-icon">⛳</div>
+      <div class="banner-copy">
+        <strong id="bannerTitle">Score submitted</strong>
+        <span id="bannerMessage"></span>
+      </div>
+    </div>
+    <div id="bannerActions" class="banner-actions"></div>
+  </aside>
+
+  <nav id="bottomNav" class="bottom-nav hidden">
+    <button data-screen="lobbyScreen" class="nav-button active">👥<span>Lobby</span></button>
+    <button data-screen="qrScreen" class="nav-button">▦<span>QR</span></button>
+    <button data-screen="drawScreen" class="nav-button">🎴<span>Draw</span></button>
+    <button data-screen="scoreScreen" class="nav-button nav-has-badge">✍️<span>Score</span><b id="scoreAlertBadge" class="nav-alert-badge hidden">0</b></button>
+    <button data-screen="leaderboardScreen" class="nav-button">🏆<span>Board</span></button>
+    <button data-screen="storyScreen" class="nav-button">📖<span>Story</span></button>
+    <button data-screen="awardsScreen" class="nav-button">🎖️<span>Awards</span></button>
+    <button data-screen="adminScreen" class="nav-button nav-has-badge">👑<span>Admin</span><b id="adminAlertBadge" class="nav-alert-badge hidden">0</b></button>
+  </nav>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
