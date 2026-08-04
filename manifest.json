@@ -1,0 +1,11 @@
+{
+  "name": "Bogey Banter v7.0 RC1.2 \u2014 The Mayhem Update",
+  "short_name": "Bogey Banter",
+  "description": "The ultimate social golf tournament app.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "orientation": "portrait",
+  "icons": []
+}
